@@ -1,13 +1,16 @@
 # Merkle Token Claimer for Cosmos Migration
 
-This example demonstrates a merkle tree-based token claiming mechanism on Solana. Users with balances on your deprecated Cosmos chain can claim equivalent tokens on Solana by providing a merkle proof.
+This example demonstrates a realistic Merkle-based token migration flow on Solana. Users with balances on a deprecated Cosmos chain can claim equivalent SPL tokens on Solana by presenting a stable Merkle proof, and the program prevents double-claims with dedicated claim receipt PDAs.
+
+The Anchor workspace in this example is configured for Anchor `1.0.0`.
 
 ## How It Works
 
-1. **Snapshot Cosmos balances** - Export all holder addresses and balances from your Cosmos chain
-2. **Build merkle tree** - Each leaf contains: `[solana_pubkey (32 bytes) | amount (8 bytes) | claimed_flag (1 byte)]`
-3. **Initialize airdrop** - Deploy the program with the merkle root and mint total supply to a vault
-4. **Users claim** - Each user provides their merkle proof to claim their tokens
+1. **Snapshot Cosmos balances** at a chosen height and map each Cosmos owner to a Solana address.
+2. **Build a fixed Merkle tree** where each leaf contains `[solana_pubkey (32 bytes) | amount (8 bytes)]`.
+3. **Initialize the airdrop** by storing the Merkle root on-chain and minting the full claimable supply into a vault ATA owned by the program PDA.
+4. **Users claim independently** by submitting `amount + merkle_proof + index`.
+5. **Program creates a claim receipt PDA** for that index, preventing the same allocation from being claimed twice.
 
 ## What You Need to Add
 
@@ -16,9 +19,9 @@ This example demonstrates a merkle tree-based token claiming mechanism on Solana
 You must build tooling to:
 
 - Query your Cosmos chain for all token holder balances at a specific block height
-- Map Cosmos addresses to Solana addresses (users must register their Solana pubkey)
-- Generate the merkle tree from the snapshot data
-- Provide a frontend/API for users to fetch their merkle proofs
+- Map Cosmos addresses to Solana addresses before the snapshot
+- Generate the Merkle tree from the finalized snapshot data
+- Provide a frontend or API for users to fetch their Merkle proof and index
 
 ### 2. Token Configuration
 
@@ -33,53 +36,59 @@ Update the following for your migration:
 
 ## Key Files
 
-```
-programs/merkle-tree-token-claimer/src/lib.rs  # On-chain program (3 instructions)
-tests/merkle-tree-token-claimer.ts             # Example usage and tests
+```text
+programs/merkle-tree-token-claimer/src/lib.rs  # On-chain program
+programs/merkle-tree-token-claimer/tests/merkle_tree_token_claimer_litesvm.rs  # LiteSVM integration coverage
+scripts/generate-merkle-tree.ts                # Off-chain tree/proof generator
 ```
 
 ## Program Instructions
 
 | Instruction | Purpose | Who Calls |
 |-------------|---------|-----------|
-| `initialize_airdrop_data` | Create vault, set merkle root, mint tokens | Authority (once) |
-| `update_tree` | Update merkle root if needed | Authority only |
-| `claim_airdrop` | Claim tokens with merkle proof | Any whitelisted user |
+| `initialize_airdrop_data` | Create state, mint, and vault funding | Authority (once) |
+| `update_tree` | Replace the Merkle root before any claims happen | Authority only |
+| `claim_airdrop` | Verify proof, transfer tokens, and create receipt PDA | Whitelisted user |
 
 ## Claim Flow
 
-```
+```text
 User submits: amount + merkle_proof + index
     ↓
-Program verifies proof against on-chain merkle root
+Program recomputes the leaf hash from signer + amount
     ↓
-Tokens transfer from vault → user's token account
+Program verifies the proof against the fixed on-chain root
     ↓
-Merkle root updates (marks leaf as claimed, prevents double-claim)
+Program creates claim_receipt PDA for that index
+    ↓
+Tokens transfer from vault → user's ATA
 ```
+
+Unlike the earlier mutable-root approach, one user claiming does not invalidate other users' proofs.
 
 ## Building the Merkle Tree
 
-The tree uses **SHA-256 hashing** (native on Solana, more compute-efficient). Each leaf must be exactly 41 bytes:
+The tree uses **SHA-256 hashing**. Each leaf must be exactly 40 bytes:
 
-```
-bytes 0-31:  Solana pubkey (the claimer's address)
+```text
+bytes 0-31: Solana pubkey
 bytes 32-39: Amount (u64, little-endian)
-byte 40:     Claimed flag (0 = unclaimed, 1 = claimed)
 ```
 
-Use the `svm-merkle-tree` library (see `package.json` devDependencies) to construct trees and generate proofs client-side.
+Use the `svm-merkle-tree` library to construct the tree and generate proofs client-side.
 
 ## Running Tests
 
 ```bash
-anchor build
-anchor test
+anchor build --ignore-keys
+cargo test -p merkle-tree-token-claimer --test merkle_tree_token_claimer_litesvm -- --nocapture
 ```
+
+The LiteSVM test loads `target/deploy/merkle_tree_token_claimer.so` directly, so the program must be built before running the Rust integration test.
 
 ## Security Notes
 
-- Mint authority is revoked after initialization (no additional minting possible)
-- Only the program PDA can transfer from the vault
-- Merkle root changes after each claim, invalidating reused proofs
-- Authority can update the tree before claims if corrections are needed
+- Mint authority is revoked after initialization, so no extra tokens can be minted later.
+- Claim proofs are stable because the Merkle root does not change after users start claiming.
+- Double-claims are blocked by `claim_receipt` PDAs derived from `(airdrop_state, index)`.
+- `update_tree` is only allowed before the first claim. If you need to change both the root and total funded amount after launch, redeploy a new distribution instance instead of mutating a live one.

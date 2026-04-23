@@ -1,0 +1,16 @@
+[package]
+name = "escrow"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cosmwasm-std = "1.5"
+cosmwasm-schema = "1.5"
+cw-storage-plus = "1.2"
+cw20 = "1.1"
+schemars = "0.8"
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+thiserror = "1.0"

@@ -1,0 +1,9 @@
+/Users/brimigs/code/cosmos-migration-guide/example-merkle-token-claimer/target/debug/deps/agave_syscalls-ca74919bbd8e5857.d: /Users/brimigs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/agave-syscalls-3.1.12/src/lib.rs /Users/brimigs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/agave-syscalls-3.1.12/src/cpi.rs /Users/brimigs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/agave-syscalls-3.1.12/src/logging.rs /Users/brimigs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/agave-syscalls-3.1.12/src/mem_ops.rs /Users/brimigs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/agave-syscalls-3.1.12/src/sysvar.rs
+
+/Users/brimigs/code/cosmos-migration-guide/example-merkle-token-claimer/target/debug/deps/libagave_syscalls-ca74919bbd8e5857.rmeta: /Users/brimigs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/agave-syscalls-3.1.12/src/lib.rs /Users/brimigs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/agave-syscalls-3.1.12/src/cpi.rs /Users/brimigs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/agave-syscalls-3.1.12/src/logging.rs /Users/brimigs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/agave-syscalls-3.1.12/src/mem_ops.rs /Users/brimigs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/agave-syscalls-3.1.12/src/sysvar.rs
+
+/Users/brimigs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/agave-syscalls-3.1.12/src/lib.rs:
+/Users/brimigs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/agave-syscalls-3.1.12/src/cpi.rs:
+/Users/brimigs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/agave-syscalls-3.1.12/src/logging.rs:
+/Users/brimigs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/agave-syscalls-3.1.12/src/mem_ops.rs:
+/Users/brimigs/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/agave-syscalls-3.1.12/src/sysvar.rs:

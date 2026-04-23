@@ -6,17 +6,17 @@
     {
       "cosmos_address": "cosmos1abc123...",
       "solana_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
-      "amount": 1000000000
+      "amount": "1000000000"
     },
     {
       "cosmos_address": "cosmos1def456...",
       "solana_address": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
-      "amount": 500000000
+      "amount": "500000000"
     },
     {
       "cosmos_address": "cosmos1ghi789...",
       "solana_address": "HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH",
-      "amount": 250000000
+      "amount": "250000000"
     }
   ]
 }

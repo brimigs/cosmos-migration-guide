@@ -8,15 +8,15 @@
  * Usage: npx ts-node generate-merkle-tree.ts <snapshot.json> <output.json>
  */
 
-import { PublicKey } from "@solana/web3.js";
-import * as anchor from "@coral-xyz/anchor";
-import { HashingAlgorithm, MerkleTree } from "svm-merkle-tree";
+import * as anchor from "@anchor-lang/core";
 import * as fs from "fs";
+import { PublicKey } from "@solana/web3.js";
+import { HashingAlgorithm, MerkleTree } from "svm-merkle-tree";
 
 interface SnapshotEntry {
   cosmos_address: string;
   solana_address: string;
-  amount: number;
+  amount: string | number;
 }
 
 interface Snapshot {
@@ -29,35 +29,46 @@ interface Snapshot {
 interface ProofEntry {
   solana_address: string;
   cosmos_address: string;
-  amount: number;
+  amount: string;
   index: number;
-  proof: string; // hex-encoded proof bytes
+  proof: string;
 }
 
 interface Output {
-  merkle_root: number[]; // 32-byte array for on-chain storage
+  merkle_root: number[];
   merkle_root_hex: string;
-  total_amount: number;
+  total_amount: string;
   total_entries: number;
   snapshot_height: number;
   proofs: ProofEntry[];
 }
 
+function parseAmount(amount: string | number): anchor.BN {
+  if (typeof amount === "number") {
+    if (!Number.isSafeInteger(amount) || amount < 0) {
+      throw new Error(`invalid numeric amount: ${amount}`);
+    }
+    return new anchor.BN(amount);
+  }
+
+  if (!/^\d+$/.test(amount)) {
+    throw new Error(`invalid string amount: ${amount}`);
+  }
+
+  return new anchor.BN(amount, 10);
+}
+
 function createLeafBytes(
   solanaAddress: PublicKey,
-  amount: number,
-  isClaimed: boolean
+  amount: anchor.BN
 ): Buffer {
-  // Leaf format: [pubkey (32 bytes) | amount (8 bytes LE) | isClaimed (1 byte)]
   return Buffer.concat([
     solanaAddress.toBuffer(),
-    Buffer.from(new Uint8Array(new anchor.BN(amount).toArray("le", 8))),
-    Buffer.from([isClaimed ? 1 : 0]),
+    Buffer.from(new Uint8Array(amount.toArray("le", 8))),
   ]);
 }
 
 function generateMerkleTree(snapshotPath: string, outputPath: string): void {
-  // Read snapshot
   const snapshotData = fs.readFileSync(snapshotPath, "utf-8");
   const snapshot: Snapshot = JSON.parse(snapshotData);
 
@@ -65,32 +76,31 @@ function generateMerkleTree(snapshotPath: string, outputPath: string): void {
   console.log(`Snapshot height: ${snapshot.snapshot_height}`);
   console.log(`Total entries: ${snapshot.entries.length}`);
 
-  // Create merkle tree with SHA-256 (native on Solana, more efficient)
   const merkleTree = new MerkleTree(HashingAlgorithm.Sha256, 32);
+  const validEntries: Array<SnapshotEntry & { amountBn: anchor.BN }> = [];
 
-  // Add all entries as leaves
-  const validEntries: SnapshotEntry[] = [];
   for (const entry of snapshot.entries) {
     try {
       const solanaKey = new PublicKey(entry.solana_address);
-      const leafBytes = createLeafBytes(solanaKey, entry.amount, false);
+      const amountBn = parseAmount(entry.amount);
+      const leafBytes = createLeafBytes(solanaKey, amountBn);
       merkleTree.add_leaf(leafBytes);
-      validEntries.push(entry);
+      validEntries.push({ ...entry, amountBn });
     } catch (error) {
       console.warn(
-        `Skipping invalid Solana address: ${entry.solana_address} (${entry.cosmos_address})`
+        `Skipping invalid entry for ${entry.cosmos_address}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
       );
     }
   }
 
-  // Generate merkle root
   merkleTree.merklize();
   const merkleRoot = Array.from(merkleTree.get_merkle_root());
   const merkleRootHex = Buffer.from(merkleRoot).toString("hex");
 
   console.log(`\nMerkle root: 0x${merkleRootHex}`);
 
-  // Generate proofs for each entry
   const proofs: ProofEntry[] = validEntries.map((entry, index) => {
     const proof = merkleTree.merkle_proof_index(index);
     const proofBytes = Buffer.from(proof.get_pairing_hashes());
@@ -98,32 +108,31 @@ function generateMerkleTree(snapshotPath: string, outputPath: string): void {
     return {
       solana_address: entry.solana_address,
       cosmos_address: entry.cosmos_address,
-      amount: entry.amount,
-      index: index,
+      amount: entry.amountBn.toString(),
+      index,
       proof: proofBytes.toString("hex"),
     };
   });
 
-  // Calculate total
-  const totalAmount = validEntries.reduce((sum, e) => sum + e.amount, 0);
+  const totalAmount = validEntries.reduce(
+    (sum, entry) => sum.add(entry.amountBn),
+    new anchor.BN(0)
+  );
 
-  // Build output
   const output: Output = {
     merkle_root: merkleRoot,
     merkle_root_hex: merkleRootHex,
-    total_amount: totalAmount,
+    total_amount: totalAmount.toString(),
     total_entries: validEntries.length,
     snapshot_height: snapshot.snapshot_height,
-    proofs: proofs,
+    proofs,
   };
 
-  // Write output
   fs.writeFileSync(outputPath, JSON.stringify(output, null, 2));
   console.log(`\nOutput written to: ${outputPath}`);
-  console.log(`Total claimable amount: ${totalAmount}`);
+  console.log(`Total claimable amount: ${output.total_amount}`);
 }
 
-// CLI
 const args = process.argv.slice(2);
 if (args.length < 2) {
   console.log("Usage: npx ts-node generate-merkle-tree.ts <snapshot.json> <output.json>");

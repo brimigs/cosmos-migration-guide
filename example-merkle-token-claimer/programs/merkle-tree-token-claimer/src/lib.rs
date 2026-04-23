@@ -1,6 +1,12 @@
 use anchor_lang::prelude::*;
-use anchor_spl::{associated_token::AssociatedToken, token::{mint_to, set_authority, transfer, Mint, MintTo, SetAuthority, Token, TokenAccount, Transfer}};
-use svm_merkle_tree::{HashingAlgorithm, MerkleProof};
+use anchor_spl::{
+    associated_token::AssociatedToken,
+    token::{
+        mint_to, set_authority, transfer_checked, Mint, MintTo, SetAuthority, Token, TokenAccount,
+        TransferChecked,
+    },
+};
+use sha2::{Digest, Sha256};
 
 declare_id!("GTCPuHiGookQVSAgGc7CzBiFYPytjVAq6vdCV3NnZoHa");
 
@@ -11,53 +17,53 @@ pub mod merkle_tree_token_claimer {
     use super::*;
 
     pub fn initialize_airdrop_data(
-        ctx: Context<Initialize>, 
+        ctx: Context<Initialize>,
         merkle_root: [u8; 32],
         amount: u64,
     ) -> Result<()> {
+        require!(amount > 0, ClaimError::InvalidAmount);
 
-        ctx.accounts.airdrop_state.set_inner(
-            AirdropState {
-                merkle_root,
-                authority: ctx.accounts.authority.key(),
-                mint: ctx.accounts.mint.key(),
-                airdrop_amount: amount,
-                amount_claimed: 0,
-                bump: ctx.bumps.airdrop_state,
-            }
-        );
+        ctx.accounts.airdrop_state.set_inner(AirdropState {
+            merkle_root,
+            authority: ctx.accounts.authority.key(),
+            mint: ctx.accounts.mint.key(),
+            airdrop_amount: amount,
+            amount_claimed: 0,
+            bump: ctx.bumps.airdrop_state,
+        });
 
         mint_to(
             CpiContext::new(
-                ctx.accounts.token_program.to_account_info(), 
+                ctx.accounts.token_program.key(),
                 MintTo {
                     mint: ctx.accounts.mint.to_account_info(),
                     to: ctx.accounts.vault.to_account_info(),
                     authority: ctx.accounts.authority.to_account_info(),
-                }
+                },
             ),
-            amount
+            amount,
         )?;
 
         set_authority(
             CpiContext::new(
-                ctx.accounts.token_program.to_account_info(), 
+                ctx.accounts.token_program.key(),
                 SetAuthority {
                     current_authority: ctx.accounts.authority.to_account_info(),
                     account_or_mint: ctx.accounts.mint.to_account_info(),
-                }
-            ), 
+                },
+            ),
             AuthorityType::MintTokens,
-            None
+            None,
         )?;
 
         Ok(())
     }
 
-    pub fn update_tree(
-        ctx: Context<Update>, 
-        new_root: [u8; 32]
-    ) -> Result<()> {
+    pub fn update_tree(ctx: Context<Update>, new_root: [u8; 32]) -> Result<()> {
+        require!(
+            ctx.accounts.airdrop_state.amount_claimed == 0,
+            ClaimError::ClaimsStarted
+        );
 
         ctx.accounts.airdrop_state.merkle_root = new_root;
 
@@ -69,86 +75,78 @@ pub mod merkle_tree_token_claimer {
         amount: u64,
         hashes: Vec<u8>,
         index: u64,
-    ) -> Result<()> {    
-        let airdrop_state = &mut ctx.accounts.airdrop_state;
-    
-        // Step 1: Verify that the Signer and Amount are right by computing the original leaf
-        let mut original_leaf = Vec::new();
-        original_leaf.extend_from_slice(&ctx.accounts.signer.key().to_bytes());
-        original_leaf.extend_from_slice(&amount.to_le_bytes());
-        original_leaf.push(0u8); // isClaimed = false
-    
-        // Step 2: Verify the Merkle proof against the on-chain root
-        let merkle_proof = MerkleProof::new(
-            HashingAlgorithm::Sha256,
-            32,
-            index as u32,
-            hashes.clone(),
+    ) -> Result<()> {
+        require!(amount > 0, ClaimError::InvalidAmount);
+        require!(
+            ctx.accounts.claim_receipt.claimer == Pubkey::default(),
+            ClaimError::AlreadyClaimed
         );
-    
-        let computed_root = merkle_proof
-            .merklize(&original_leaf)
-            .map_err(|_| WhitelistError::InvalidProof)?;
-    
+
+        let airdrop_state = &mut ctx.accounts.airdrop_state;
+        let mut leaf = Vec::with_capacity(40);
+        leaf.extend_from_slice(&ctx.accounts.signer.key().to_bytes());
+        leaf.extend_from_slice(&amount.to_le_bytes());
+
+        let computed_root = compute_merkle_root(&leaf, &hashes, index)?;
+
         require!(
             computed_root.eq(&airdrop_state.merkle_root),
-            WhitelistError::InvalidProof
+            ClaimError::InvalidProof
         );
-    
-        // Step 3: Execute the transfer
+
+        let new_amount_claimed = airdrop_state
+            .amount_claimed
+            .checked_add(amount)
+            .ok_or(ClaimError::AmountOverflow)?;
+        require!(
+            new_amount_claimed <= airdrop_state.airdrop_amount,
+            ClaimError::ClaimExceedsAirdrop
+        );
+
         let mint_key = ctx.accounts.mint.key().to_bytes();
         let signer_seeds = &[
             b"merkle_tree".as_ref(),
             mint_key.as_ref(),
             &[airdrop_state.bump],
         ];
-        transfer(
+
+        transfer_checked(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
+                ctx.accounts.token_program.key(),
+                TransferChecked {
                     from: ctx.accounts.vault.to_account_info(),
+                    mint: ctx.accounts.mint.to_account_info(),
                     to: ctx.accounts.signer_ata.to_account_info(),
                     authority: airdrop_state.to_account_info(),
                 },
                 &[signer_seeds],
             ),
             amount,
+            ctx.accounts.mint.decimals,
         )?;
-    
-        // Step 4: Update the `is_claimed` flag in the leaf
-        let mut updated_leaf = Vec::new();
-        updated_leaf.extend_from_slice(&ctx.accounts.signer.key().to_bytes());
-        updated_leaf.extend_from_slice(&amount.to_le_bytes());
-        updated_leaf.push(1u8); // isClaimed = true
-    
-        let updated_root: [u8; 32] = merkle_proof
-            .merklize(&updated_leaf)
-            .map_err(|_| WhitelistError::InvalidProof)?
-            .try_into()
-            .map_err(|_| WhitelistError::InvalidProof)?;
-    
-        // Step 5: Update the Merkle root in the airdrop state
-        airdrop_state.merkle_root = updated_root;
-    
-        // Step 6: Update the airdrop state
-        airdrop_state.amount_claimed = airdrop_state
-            .amount_claimed
-            .checked_add(amount)
-            .ok_or(WhitelistError::OverFlow)?;
-    
+
+        ctx.accounts.claim_receipt.set_inner(ClaimReceipt {
+            airdrop_state: airdrop_state.key(),
+            claimer: ctx.accounts.signer.key(),
+            index,
+            amount,
+            bump: ctx.bumps.claim_receipt,
+        });
+
+        airdrop_state.amount_claimed = new_amount_claimed;
+
         Ok(())
     }
-    
 }
 
 #[derive(Accounts)]
 pub struct Initialize<'info> {
     #[account(
-        init, 
+        init,
         seeds = [b"merkle_tree".as_ref(), mint.key().to_bytes().as_ref()],
         bump,
-        payer = authority, 
-        space = 8 + 32 + 32 + 32 + 8 + 8 + 1
+        payer = authority,
+        space = 8 + AirdropState::INIT_SPACE
     )]
     pub airdrop_state: Account<'info, AirdropState>,
     #[account(
@@ -175,16 +173,19 @@ pub struct Initialize<'info> {
 #[derive(Accounts)]
 pub struct Update<'info> {
     #[account(
-        mut, 
+        mut,
         has_one = authority,
-        seeds = [b"merkle_tree".as_ref(), airdrop_state.mint.key().to_bytes().as_ref()],
+        has_one = mint,
+        seeds = [b"merkle_tree".as_ref(), mint.key().to_bytes().as_ref()],
         bump = airdrop_state.bump
     )]
     pub airdrop_state: Account<'info, AirdropState>,
+    pub mint: Account<'info, Mint>,
     pub authority: Signer<'info>,
 }
 
 #[derive(Accounts)]
+#[instruction(amount: u64, hashes: Vec<u8>, index: u64)]
 pub struct Claim<'info> {
     #[account(
         mut,
@@ -203,6 +204,18 @@ pub struct Claim<'info> {
     #[account(
         init_if_needed,
         payer = signer,
+        space = 8 + ClaimReceipt::INIT_SPACE,
+        seeds = [
+            b"claim_receipt".as_ref(),
+            airdrop_state.key().as_ref(),
+            index.to_le_bytes().as_ref()
+        ],
+        bump
+    )]
+    pub claim_receipt: Account<'info, ClaimReceipt>,
+    #[account(
+        init_if_needed,
+        payer = signer,
         associated_token::mint = mint,
         associated_token::authority = signer,
     )]
@@ -215,6 +228,7 @@ pub struct Claim<'info> {
 }
 
 #[account]
+#[derive(InitSpace)]
 pub struct AirdropState {
     pub merkle_root: [u8; 32],
     pub authority: Pubkey,
@@ -224,12 +238,57 @@ pub struct AirdropState {
     pub bump: u8,
 }
 
+#[account]
+#[derive(InitSpace)]
+pub struct ClaimReceipt {
+    pub airdrop_state: Pubkey,
+    pub claimer: Pubkey,
+    pub index: u64,
+    pub amount: u64,
+    pub bump: u8,
+}
+
 #[error_code]
-pub enum WhitelistError {
+pub enum ClaimError {
     #[msg("Invalid Merkle proof")]
     InvalidProof,
-    #[msg("Already claimed")]
+    #[msg("This claim has already been processed")]
     AlreadyClaimed,
     #[msg("Amount overflow")]
-    OverFlow,
+    AmountOverflow,
+    #[msg("The requested claim would exceed the initialized airdrop amount")]
+    ClaimExceedsAirdrop,
+    #[msg("The Merkle tree can only be updated before any claims are processed")]
+    ClaimsStarted,
+    #[msg("Claim amount must be greater than zero")]
+    InvalidAmount,
+}
+
+fn compute_merkle_root(leaf: &[u8], hashes: &[u8], mut index: u64) -> Result<[u8; 32]> {
+    require!(hashes.len() % 32 == 0, ClaimError::InvalidProof);
+
+    let mut current = sha256(leaf);
+
+    for sibling in hashes.chunks_exact(32) {
+        let sibling_hash: [u8; 32] = sibling.try_into().map_err(|_| ClaimError::InvalidProof)?;
+        current = if index % 2 == 0 {
+            hash_pair(&current, &sibling_hash)
+        } else {
+            hash_pair(&sibling_hash, &current)
+        };
+        index /= 2;
+    }
+
+    Ok(current)
+}
+
+fn hash_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(left);
+    hasher.update(right);
+    hasher.finalize().into()
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
 }
