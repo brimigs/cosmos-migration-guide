@@ -1,11 +1,11 @@
 use anchor_lang::{prelude::Pubkey, AccountDeserialize, InstructionData, ToAccountMetas};
-use anchor_litesvm::{AnchorContext, AnchorLiteSVM};
+use anchor_litesvm::{
+    AnchorContext, AnchorLiteSVM, AssertionHelpers, TestHelpers, TransactionResult,
+};
 use merkle_tree_token_claimer::{
     instruction::{ClaimAirdrop, InitializeAirdropData, UpdateTree},
     AirdropState, ClaimError, ClaimReceipt,
 };
-use std::fs;
-use std::path::PathBuf;
 use sha2::{Digest, Sha256};
 use solana_instruction::Instruction;
 use solana_keypair::Keypair;
@@ -13,15 +13,13 @@ use solana_native_token::LAMPORTS_PER_SOL;
 use solana_sdk_ids::system_program;
 use solana_signer::Signer;
 use spl_associated_token_account_client::program as associated_token_program;
-use spl_token::{
-    solana_program::program_pack::Pack,
-    state::{Account as TokenAccount, Mint},
-    ID as TOKEN_PROGRAM_ID,
-};
+use spl_token::{solana_program::program_pack::Pack, state::Mint, ID as TOKEN_PROGRAM_ID};
+use std::{fs, path::PathBuf, sync::OnceLock};
 
 const CLAIM_RECEIPT_ALREADY_PROCESSED: u32 = ClaimError::AlreadyClaimed as u32 + 6000;
 const INVALID_PROOF: u32 = ClaimError::InvalidProof as u32 + 6000;
 const CLAIMS_STARTED: u32 = ClaimError::ClaimsStarted as u32 + 6000;
+static PROGRAM_BYTES: OnceLock<Vec<u8>> = OnceLock::new();
 
 #[derive(Debug)]
 struct Claimant {
@@ -43,36 +41,19 @@ struct TestEnv {
 
 impl TestEnv {
     fn new() -> Self {
-        let mut ctx = AnchorLiteSVM::build_with_program(
-            merkle_tree_token_claimer::ID,
-            &load_program_bytes(),
-        );
+        let mut ctx =
+            AnchorLiteSVM::build_with_program(merkle_tree_token_claimer::ID, load_program_bytes());
 
-        let authority = Keypair::new();
-        ctx.svm
-            .airdrop(&authority.pubkey(), 10 * LAMPORTS_PER_SOL)
+        let authority = ctx
+            .svm
+            .create_funded_account(10 * LAMPORTS_PER_SOL)
             .unwrap();
-
-        let claimants = vec![
-            Claimant {
-                wallet: Keypair::new(),
-                amount: 125,
-            },
-            Claimant {
-                wallet: Keypair::new(),
-                amount: 275,
-            },
-            Claimant {
-                wallet: Keypair::new(),
-                amount: 400,
-            },
-        ];
-
-        for claimant in &claimants {
-            ctx.svm
-                .airdrop(&claimant.wallet.pubkey(), LAMPORTS_PER_SOL)
-                .unwrap();
-        }
+        let claimant_wallets = ctx.svm.create_funded_accounts(3, LAMPORTS_PER_SOL).unwrap();
+        let claimants = claimant_wallets
+            .into_iter()
+            .zip([125, 275, 400])
+            .map(|(wallet, amount)| Claimant { wallet, amount })
+            .collect::<Vec<_>>();
 
         let mint = Keypair::new();
         let order = (0..claimants.len()).collect::<Vec<_>>();
@@ -153,7 +134,14 @@ impl TestEnv {
     }
 
     fn update_tree(&mut self, new_root: [u8; 32]) {
-        let ix = Instruction {
+        self.ctx
+            .execute_instruction(self.update_ix(new_root), &[&self.authority])
+            .unwrap()
+            .assert_success();
+    }
+
+    fn update_ix(&self, new_root: [u8; 32]) -> Instruction {
+        Instruction {
             program_id: merkle_tree_token_claimer::ID,
             accounts: merkle_tree_token_claimer::accounts::Update {
                 airdrop_state: self.airdrop_state,
@@ -162,12 +150,7 @@ impl TestEnv {
             }
             .to_account_metas(None),
             data: UpdateTree { new_root }.data(),
-        };
-
-        self.ctx
-            .execute_instruction(ix, &[&self.authority])
-            .unwrap()
-            .assert_success();
+        }
     }
 
     fn proof_for(&self, claimant_index: usize) -> (u64, Vec<u8>) {
@@ -176,9 +159,7 @@ impl TestEnv {
             .iter()
             .position(|index| *index == claimant_index)
             .unwrap() as u64;
-        let proof = self
-            .tree
-            .proof(position as usize);
+        let proof = self.tree.proof(position as usize);
         (position, proof)
     }
 
@@ -198,13 +179,7 @@ impl TestEnv {
         associated_token_address(wallet, &self.mint.pubkey())
     }
 
-    fn claim_ix(
-        &self,
-        signer: &Pubkey,
-        amount: u64,
-        proof: Vec<u8>,
-        index: u64,
-    ) -> Instruction {
+    fn claim_ix(&self, signer: &Pubkey, amount: u64, proof: Vec<u8>, index: u64) -> Instruction {
         let signer_ata = self.signer_ata(signer);
         let claim_receipt = self.claim_receipt(index);
         Instruction {
@@ -245,11 +220,6 @@ impl TestEnv {
         self.ctx.get_account(address).unwrap()
     }
 
-    fn read_token_account(&self, address: &Pubkey) -> TokenAccount {
-        let account = self.ctx.svm.get_account(address).unwrap();
-        TokenAccount::unpack(&account.data).unwrap()
-    }
-
     fn read_mint(&self) -> Mint {
         let account = self.ctx.svm.get_account(&self.mint.pubkey()).unwrap();
         Mint::unpack(&account.data).unwrap()
@@ -263,15 +233,18 @@ fn initializes_and_updates_before_claims() {
 
     let state: AirdropState = env.read_anchor_account(&env.airdrop_state);
     let mint = env.read_mint();
-    let vault = env.read_token_account(&env.vault);
 
     assert_eq!(state.merkle_root, env.merkle_root());
     assert_eq!(state.airdrop_amount, env.total_airdrop_amount);
     assert_eq!(state.amount_claimed, 0);
     assert_eq!(state.authority, env.authority.pubkey());
-    assert_eq!(mint.supply, env.total_airdrop_amount);
     assert!(mint.mint_authority.is_none());
-    assert_eq!(vault.amount, env.total_airdrop_amount);
+    env.ctx
+        .svm
+        .assert_mint_supply(&env.mint.pubkey(), env.total_airdrop_amount);
+    env.ctx
+        .svm
+        .assert_token_balance(&env.vault, env.total_airdrop_amount);
 
     let updated_root = env.reverse_tree();
     env.update_tree(updated_root);
@@ -292,29 +265,30 @@ fn records_receipts_and_keeps_other_proofs_valid() {
     let first_index = env.claim_success(0);
     let first_receipt: ClaimReceipt = env.read_anchor_account(&env.claim_receipt(first_index));
     let first_signer_ata = env.signer_ata(&env.claimants[0].wallet.pubkey());
-    let first_ata = env.read_token_account(&first_signer_ata);
     let state_after_first: AirdropState = env.read_anchor_account(&env.airdrop_state);
 
-    assert_eq!(first_ata.amount, env.claimants[0].amount);
+    env.ctx
+        .svm
+        .assert_token_balance(&first_signer_ata, env.claimants[0].amount);
     assert_eq!(first_receipt.claimer, env.claimants[0].wallet.pubkey());
     assert_eq!(first_receipt.amount, env.claimants[0].amount);
     assert_eq!(state_after_first.amount_claimed, env.claimants[0].amount);
 
     let second_index = env.claim_success(1);
     let second_signer_ata = env.signer_ata(&env.claimants[1].wallet.pubkey());
-    let second_ata = env.read_token_account(&second_signer_ata);
-    let vault = env.read_token_account(&env.vault);
     let state_after_second: AirdropState = env.read_anchor_account(&env.airdrop_state);
     let second_receipt: ClaimReceipt = env.read_anchor_account(&env.claim_receipt(second_index));
 
-    assert_eq!(second_ata.amount, env.claimants[1].amount);
+    env.ctx
+        .svm
+        .assert_token_balance(&second_signer_ata, env.claimants[1].amount);
     assert_eq!(
         state_after_second.amount_claimed,
         env.claimants[0].amount + env.claimants[1].amount
     );
-    assert_eq!(
-        vault.amount,
-        env.total_airdrop_amount - env.claimants[0].amount - env.claimants[1].amount
+    env.ctx.svm.assert_token_balance(
+        &env.vault,
+        env.total_airdrop_amount - env.claimants[0].amount - env.claimants[1].amount,
     );
     assert_eq!(second_receipt.index, second_index);
     assert_eq!(second_receipt.amount, env.claimants[1].amount);
@@ -335,12 +309,16 @@ fn rejects_duplicate_and_invalid_claims() {
         duplicate_proof,
         duplicate_index,
     );
+    env.ctx.svm.expire_blockhash();
     let duplicate_result = env
         .ctx
         .execute_instruction(duplicate_ix, &[&env.claimants[0].wallet])
         .unwrap();
-    duplicate_result.assert_failure();
-    duplicate_result.assert_error_code(CLAIM_RECEIPT_ALREADY_PROCESSED);
+    assert_custom_error(
+        &duplicate_result,
+        CLAIM_RECEIPT_ALREADY_PROCESSED,
+        "AlreadyClaimed",
+    );
 
     let attacker = Keypair::new();
     env.ctx
@@ -358,8 +336,7 @@ fn rejects_duplicate_and_invalid_claims() {
         .ctx
         .execute_instruction(invalid_ix, &[&attacker])
         .unwrap();
-    invalid_result.assert_failure();
-    invalid_result.assert_error_code(INVALID_PROOF);
+    assert_custom_error(&invalid_result, INVALID_PROOF, "InvalidProof");
 }
 
 #[test]
@@ -368,26 +345,11 @@ fn rejects_root_updates_after_claims_begin() {
     env.initialize_airdrop();
     env.claim_success(0);
 
-        let update_ix = Instruction {
-        program_id: merkle_tree_token_claimer::ID,
-        accounts: merkle_tree_token_claimer::accounts::Update {
-            airdrop_state: env.airdrop_state,
-            mint: env.mint.pubkey(),
-            authority: env.authority.pubkey(),
-        }
-        .to_account_metas(None),
-        data: UpdateTree {
-            new_root: env.merkle_root(),
-        }
-        .data(),
-    };
-
     let result = env
         .ctx
-        .execute_instruction(update_ix, &[&env.authority])
+        .execute_instruction(env.update_ix(env.merkle_root()), &[&env.authority])
         .unwrap();
-    result.assert_failure();
-    result.assert_error_code(CLAIMS_STARTED);
+    assert_custom_error(&result, CLAIMS_STARTED, "ClaimsStarted");
 }
 
 struct TestMerkleTree {
@@ -396,7 +358,10 @@ struct TestMerkleTree {
 
 impl TestMerkleTree {
     fn new(leaves: Vec<Vec<u8>>) -> Self {
-        let mut levels = vec![leaves.into_iter().map(|leaf| sha256(&leaf)).collect::<Vec<_>>()];
+        let mut levels = vec![leaves
+            .into_iter()
+            .map(|leaf| sha256(&leaf))
+            .collect::<Vec<_>>()];
         while levels.last().unwrap().len() > 1 {
             let current = levels.last().unwrap();
             let mut next = Vec::with_capacity(current.len().div_ceil(2));
@@ -441,14 +406,40 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-fn load_program_bytes() -> Vec<u8> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/deploy/merkle_tree_token_claimer.so");
-    fs::read(&path).unwrap_or_else(|error| {
-        panic!(
-            "failed to read program binary at {}: {error}",
-            path.display()
-        )
+fn assert_custom_error(result: &TransactionResult, error_code: u32, error_name: &str) {
+    result.assert_failure();
+
+    let hex_error = format!("custom program error: 0x{:x}", error_code);
+    let decimal_error = format!("Custom({error_code})");
+    let anchor_error = format!("Error Number: {error_code}");
+    let matched_error = result.error().is_some_and(|error| {
+        error.contains(&hex_error) || error.contains(&decimal_error) || error.contains(error_name)
+    });
+    let matched_logs = result.logs().iter().any(|log| {
+        log.contains(&hex_error)
+            || log.contains(&decimal_error)
+            || log.contains(&anchor_error)
+            || log.contains(error_name)
+    });
+
+    assert!(
+        matched_error || matched_logs,
+        "expected custom error {error_name} ({error_code})\nerror: {:?}\nlogs:\n{}",
+        result.error(),
+        result.logs().join("\n")
+    );
+}
+
+fn load_program_bytes() -> &'static [u8] {
+    PROGRAM_BYTES.get_or_init(|| {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/deploy/merkle_tree_token_claimer.so");
+        fs::read(&path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read program binary at {}: {error}",
+                path.display()
+            )
+        })
     })
 }
 

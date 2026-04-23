@@ -3,8 +3,8 @@
 use core::convert::TryInto;
 
 use pinocchio::{
-    instruction::Signer, no_allocator, nostd_panic_handler, program_entrypoint, seeds,
-    AccountView, Address, ProgramResult,
+    instruction::cpi::{Seed, Signer},
+    no_allocator, nostd_panic_handler, program_entrypoint, AccountView, Address, ProgramResult,
 };
 use pinocchio_associated_token_account::instructions::CreateIdempotent;
 use pinocchio_token::instructions::Transfer;
@@ -199,13 +199,7 @@ fn deposit(
     require_owned_by_program(receipt, program_id)?;
     require_data_len(receipt, RECEIPT_ACCOUNT_LEN)?;
 
-    Transfer {
-        from: depositor_token_account,
-        to: vault,
-        authority: depositor,
-        amount,
-    }
-    .invoke()?;
+    Transfer::new(depositor_token_account, vault, depositor, amount).invoke()?;
 
     // The official program stores the deposit timestamp and later enforces optional
     // timelock / hook extensions during withdrawal. This compact example mirrors the
@@ -258,25 +252,24 @@ fn withdraw(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult
     }
 
     let bump_ref = [escrow_state.bump];
-    let signer_seeds = seeds!(b"escrow", &escrow_state.escrow_seed, &bump_ref);
-    let signer = Signer::from(&signer_seeds);
+    let signer_seeds = [
+        Seed::from(b"escrow".as_slice()),
+        Seed::from(escrow_state.escrow_seed.as_slice()),
+        Seed::from(bump_ref.as_slice()),
+    ];
+    let signer = Signer::from(&signer_seeds[..]);
 
-    Transfer {
-        from: vault,
-        to: withdrawer_token_account,
-        authority: escrow,
-        amount: receipt_state.amount,
-    }
-    .invoke_signed(&[signer])?;
+    Transfer::new(vault, withdrawer_token_account, escrow, receipt_state.amount)
+        .invoke_signed(&[signer])?;
 
-    receipt.try_borrow_mut_data()?.fill(0);
+    receipt.try_borrow_mut()?.fill(0);
     let _ = rent_recipient;
     Ok(())
 }
 
 impl EscrowAccount {
     fn load(account: &AccountView) -> Result<Self, pinocchio::error::ProgramError> {
-        let data = account.try_borrow_data()?;
+        let data = account.try_borrow()?;
         if data.len() < ESCROW_ACCOUNT_LEN {
             return Err(pinocchio::error::ProgramError::InvalidAccountData);
         }
@@ -294,8 +287,8 @@ impl EscrowAccount {
         })
     }
 
-    fn store(&self, account: &AccountView) -> Result<(), pinocchio::error::ProgramError> {
-        let data = &mut account.try_borrow_mut_data()?;
+    fn store(&self, account: &mut AccountView) -> Result<(), pinocchio::error::ProgramError> {
+        let data = &mut account.try_borrow_mut()?;
         if data.len() < ESCROW_ACCOUNT_LEN {
             return Err(pinocchio::error::ProgramError::InvalidAccountData);
         }
@@ -311,7 +304,7 @@ impl EscrowAccount {
 
 impl ReceiptAccount {
     fn load(account: &AccountView) -> Result<Self, pinocchio::error::ProgramError> {
-        let data = account.try_borrow_data()?;
+        let data = account.try_borrow()?;
         if data.len() < RECEIPT_ACCOUNT_LEN {
             return Err(pinocchio::error::ProgramError::InvalidAccountData);
         }
@@ -348,8 +341,8 @@ impl ReceiptAccount {
         })
     }
 
-    fn store(&self, account: &AccountView) -> Result<(), pinocchio::error::ProgramError> {
-        let data = &mut account.try_borrow_mut_data()?;
+    fn store(&self, account: &mut AccountView) -> Result<(), pinocchio::error::ProgramError> {
+        let data = &mut account.try_borrow_mut()?;
         if data.len() < RECEIPT_ACCOUNT_LEN {
             return Err(pinocchio::error::ProgramError::InvalidAccountData);
         }
@@ -369,8 +362,8 @@ impl ReceiptAccount {
 }
 
 impl AllowedMintAccount {
-    fn store(&self, account: &AccountView) -> Result<(), pinocchio::error::ProgramError> {
-        let data = &mut account.try_borrow_mut_data()?;
+    fn store(&self, account: &mut AccountView) -> Result<(), pinocchio::error::ProgramError> {
+        let data = &mut account.try_borrow_mut()?;
         if data.len() < ALLOWED_MINT_ACCOUNT_LEN {
             return Err(pinocchio::error::ProgramError::InvalidAccountData);
         }

@@ -165,7 +165,7 @@ pub fn deposit(ctx: Context<Deposit>, receipt_seed: Pubkey, amount: u64) -> Resu
 **Pinocchio** - Same idea with manual account parsing and raw byte storage:
 ```rust
 fn deposit(program_id: &Address, accounts: &mut [AccountView], instruction_data: &[u8]) -> ProgramResult {
-    Transfer { from: depositor_token_account, to: vault, authority: depositor, amount }.invoke()?;
+    Transfer::new(depositor_token_account, vault, depositor, amount).invoke()?;
     ReceiptAccount { /* ... */ }.store(receipt)?;
     Ok(())
 }
@@ -200,15 +200,15 @@ pub fn withdraw(ctx: Context<Withdraw>) -> Result<()> {
 
 **Pinocchio** - Escrow PDA signs the token CPI using explicit seeds:
 ```rust
-let signer_seeds = seeds!(b"escrow", &escrow_state.escrow_seed, &bump_ref);
-let signer = Signer::from(&signer_seeds);
+let signer_seeds = [
+    Seed::from(b"escrow".as_slice()),
+    Seed::from(escrow_state.escrow_seed.as_slice()),
+    Seed::from(bump_ref.as_slice()),
+];
+let signer = Signer::from(&signer_seeds[..]);
 
-Transfer {
-    from: vault,
-    to: withdrawer_token_account,
-    authority: escrow,
-    amount: receipt_state.amount,
-}.invoke_signed(&[signer])?;
+Transfer::new(vault, withdrawer_token_account, escrow, receipt_state.amount)
+    .invoke_signed(&[signer])?;
 ```
 
 ## Migration Considerations
@@ -222,6 +222,24 @@ Transfer {
 
 ## Building
 
+## Prerequisites
+
+- Rust installed via `rustup`, not Homebrew `rust`
+- Solana CLI with SBF tooling available on `PATH`
+- Anchor CLI `1.0.x`
+
+On macOS, verify your shell is using rustup-managed Rust before building Solana programs:
+
+```bash
+which cargo
+which rustc
+which rustup
+```
+
+`cargo` should resolve to `~/.cargo/bin/cargo`. If it resolves to `/opt/homebrew/bin/cargo`, `anchor build` and `cargo build-sbf` can fail because Homebrew's `cargo` does not support rustup's `cargo +toolchain ...` syntax used by Solana tooling.
+
+## Building
+
 **CosmWasm**:
 ```bash
 cd cosmwasm
@@ -230,24 +248,52 @@ cargo build --release --target wasm32-unknown-unknown
 
 **Anchor**:
 ```bash
-./scripts/build-anchor.sh
+cd anchor
+anchor build
 ```
 
 **Pinocchio**:
 ```bash
-./scripts/build-pinocchio.sh
+cd pinocchio
+cargo build-sbf --features bpf-entrypoint
 ```
 
-## macOS / Homebrew Rust note
+## Testing
 
-If `anchor build` or `cargo build-sbf` fails with:
+Both Solana implementations now have LiteSVM-based Rust integration tests.
 
-```text
-error: no such command: `+<toolchain>`
-help: invoke `cargo` through `rustup` to handle `+toolchain` directives
+**Anchor**:
+```bash
+cd anchor
+anchor build
+cargo test -p escrow --test escrow_litesvm -- --nocapture
 ```
 
-your shell is using Homebrew's `cargo` instead of a rustup-managed cargo shim. The helper scripts above prepend `example-escrow-contracts/bin/cargo`, which forwards all cargo invocations through `rustup` and preserves Solana's `+toolchain` arguments.
+The Anchor test suite uses `anchor-litesvm` plus `litesvm-utils` and covers:
+- successful `create_escrow -> allow_mint -> deposit -> withdraw`
+- zero-amount deposit rejection
+
+**Pinocchio**:
+```bash
+cd pinocchio
+cargo build-sbf --features bpf-entrypoint
+cargo test --test escrow_litesvm -- --nocapture
+```
+
+The Pinocchio test suite uses raw `litesvm` plus `litesvm-utils` and covers:
+- successful `create_escrow -> allow_mint -> deposit -> withdraw`
+- withdrawal rejection for a non-depositor
+
+## Test Implementation Notes
+
+- The Anchor tests load `anchor/target/deploy/escrow.so` and use the generated Anchor account/instruction types directly.
+- The Pinocchio tests load `pinocchio/target/deploy/escrow_pinocchio.so`, provision program-owned PDA accounts manually, and then drive the program with raw `Instruction` values.
+- Host-side Rust tests for both crates are configured to accept `target_os = "solana"` in `check-cfg`, which removes the upstream macro warnings during `cargo test`.
+
+## Notes
+
+- The Anchor escrow example declares the internal `anchor-debug`, `custom-heap`, and `custom-panic` feature names expected by modern Rust `check-cfg`, so it should build cleanly without those macro warnings.
+- `Anchor.toml` pins this example to Anchor CLI `1.0.0`. Using a different installed Anchor version may produce version mismatch warnings even if the build still succeeds.
 
 ## Sources
 

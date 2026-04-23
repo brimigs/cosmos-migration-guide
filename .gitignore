@@ -1,3 +1,4 @@
 example-escrow-contracts/anchor/target/
 example-escrow-contracts/cosmwasm/target/
 example-escrow-contracts/pinocchio/target/
+example-merkle-token-claimer/target/
